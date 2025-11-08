@@ -1,6 +1,7 @@
 import random
 import numpy as np
-from qiskit import QuantumCircuit, Aer, execute
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import Aer
 from datetime import datetime
 
 class Alice:
@@ -41,7 +42,7 @@ class Bob:
             
             circuit.measure(0, 0)
             
-            job = execute(circuit, self.backend, shots=1)
+            job = self.backend.run(transpile(circuit, self.backend), shots=1)
             result = job.result()
             counts = result.get_counts(circuit)
             measured_bit = int(list(counts.keys())[0])
