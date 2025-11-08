@@ -1,6 +1,7 @@
 import random
 import numpy as np
-from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, Aer, execute
+from qiskit import QuantumCircuit, Aer, execute
+from datetime import datetime
 
 class Alice:
     def __init__(self, key_length=100):
@@ -55,18 +56,27 @@ class BB84Protocol:
         self.bob = Bob(key_length)
         self.sifted_key_alice = []
         self.sifted_key_bob = []
+        self.basis_matches = 0
+        self.execution_time = 0
         
     def execute(self):
+        start_time = datetime.now()
+        
         qubits = self.alice.prepare_qubits()
         self.bob.measure_qubits(qubits)
         
         self.sifted_key_alice = []
         self.sifted_key_bob = []
+        self.basis_matches = 0
         
         for i in range(self.key_length):
             if self.alice.bases[i] == self.bob.bases[i]:
                 self.sifted_key_alice.append(self.alice.bits[i])
                 self.sifted_key_bob.append(self.bob.measurements[i])
+                self.basis_matches += 1
+        
+        end_time = datetime.now()
+        self.execution_time = (end_time - start_time).total_seconds()
         
         return self.sifted_key_alice, self.sifted_key_bob
     
@@ -77,14 +87,35 @@ class BB84Protocol:
         errors = sum(1 for a, b in zip(self.sifted_key_alice, self.sifted_key_bob) if a != b)
         return (errors / len(self.sifted_key_alice)) * 100
     
-    def get_final_key(self, test_fraction=0.5):
+    def calculate_fidelity(self):
+        if len(self.sifted_key_alice) == 0:
+            return 0
+        
+        matches = sum(1 for a, b in zip(self.sifted_key_alice, self.sifted_key_bob) if a == b)
+        return (matches / len(self.sifted_key_alice)) * 100
+    
+    def get_basis_efficiency(self):
+        return (self.basis_matches / self.key_length) * 100
+    
+    def get_final_key(self, test_fraction=0.5, qber_threshold=11.0):
         if not self.sifted_key_alice:
             return []
             
         test_length = int(len(self.sifted_key_alice) * test_fraction)
         
         qber = self.calculate_qber()
-        if qber > 11:
+        if qber > qber_threshold:
             return []
         
         return self.sifted_key_alice[test_length:]
+    
+    def get_metrics(self):
+        return {
+            'raw_key_length': self.key_length,
+            'sifted_key_length': len(self.sifted_key_alice),
+            'basis_matches': self.basis_matches,
+            'basis_efficiency': self.get_basis_efficiency(),
+            'qber': self.calculate_qber(),
+            'fidelity': self.calculate_fidelity(),
+            'execution_time': self.execution_time
+        }
