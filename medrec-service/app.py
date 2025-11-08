@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import json
 from datetime import datetime
 from bb84 import BB84Protocol
@@ -10,6 +11,7 @@ from analytics import SecurityAnalytics
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 quantum_crypto = QuantumEncryption()
 analytics = SecurityAnalytics()
@@ -18,6 +20,16 @@ current_qber = 0
 eve_active = False
 eve_strategy = 'random'
 encrypted_records = {}
+
+# Active connections
+active_connections = {
+    'alice': None,
+    'bob': None,
+    'eve': None
+}
+
+def broadcast_to_all(event, data):
+    socketio.emit(event, data)
 
 def log_event(event_type, message, severity='INFO', details=None):
     event = {
@@ -33,7 +45,40 @@ def log_event(event_type, message, severity='INFO', details=None):
     if len(security_log) > 100:
         security_log.pop(0)
     
+    # Only broadcast if socketio is initialized and we have connections
+    try:
+        if socketio and event_type != 'SYSTEM_START':
+            broadcast_to_all('security_event', event)
+    except:
+        pass  # Ignore broadcast errors during startup
+    
     return event
+
+# WebSocket connection handlers
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
+@socketio.on('join_actor')
+def handle_join_actor(data):
+    actor = data.get('actor')  # 'alice', 'bob', or 'eve'
+    if actor in active_connections:
+        active_connections[actor] = request.sid
+        join_room(actor)
+        emit('actor_joined', {'actor': actor})
+        broadcast_to_all('actor_status', active_connections)
+
+@socketio.on('leave_actor')
+def handle_leave_actor(data):
+    actor = data.get('actor')
+    if actor in active_connections:
+        active_connections[actor] = None
+        leave_room(actor)
+        broadcast_to_all('actor_status', active_connections)
 
 @app.route('/api/qkd/generate', methods=['POST'])
 def generate_quantum_key():
@@ -47,14 +92,15 @@ def generate_quantum_key():
         qubits = bb84.alice.prepare_qubits()
         
         eve_stats = None
+        intercepted_qubits = None
         if eve_active:
             eve = Eve(attack_strategy=eve_strategy)
-            qubits = eve.intercept_and_resend(qubits)
+            intercepted_qubits = eve.intercept_and_resend(qubits)
             eve_stats = eve.get_attack_stats()
             log_event('EAVESDROP_ATTEMPT', f'Eve intercepted transmission using {eve_strategy} strategy', 'HIGH', eve_stats)
         
-        bb84.bob.measure_qubits(qubits)
-        alice_key, bob_key = bb84.execute()
+        # Execute BB84 with potentially intercepted qubits
+        alice_key, bob_key = bb84.execute(intercepted_qubits)
         
         metrics = bb84.get_metrics()
         current_qber = metrics['qber']
@@ -71,11 +117,43 @@ def generate_quantum_key():
             status = 'rejected'
             log_event('KEY_REJECTED', f'Key rejected due to high QBER: {current_qber:.2f}%', 'CRITICAL')
         
+        # Broadcast key generation to all actors
+        broadcast_to_all('key_generated', {
+            'status': status,
+            'metrics': metrics,
+            'qber': current_qber,
+            'eve_detected': eve_active and current_qber > 11,
+            'quantum_data': {
+                'alice_bits': bb84.alice.bits[:10],
+                'alice_bases': bb84.alice.bases[:10],
+                'bob_bases': bb84.bob.bases[:10],
+                'bob_measurements': bb84.bob.measurements[:10],
+                'sifted_key': bb84.sifted_key_alice[:5]
+            }
+        })
+        
+        # Also broadcast security status update
+        broadcast_to_all('security_status_update', {
+            'qber': current_qber,
+            'eve_active': eve_active,
+            'threat_level': 'CRITICAL' if current_qber > 11 else 'LOW',
+            'key_status': 'active' if final_key else 'compromised'
+        })
+        
         response = {
             'status': status,
             'metrics': metrics,
             'final_key_length': len(final_key) if final_key else 0,
-            'eve_detected': eve_active and current_qber > 11
+            'eve_detected': eve_active and current_qber > 11,
+            'bb84_proof': {
+                'alice_bits': bb84.alice.bits[:20],
+                'alice_bases': bb84.alice.bases[:20],
+                'bob_bases': bb84.bob.bases[:20],
+                'bob_measurements': bb84.bob.measurements[:20],
+                'basis_matches': [i for i in range(20) if bb84.alice.bases[i] == bb84.bob.bases[i]],
+                'sifted_alice': bb84.sifted_key_alice[:10],
+                'sifted_bob': bb84.sifted_key_bob[:10]
+            }
         }
         
         if eve_stats:
@@ -100,6 +178,14 @@ def encrypt_record():
         encrypted = quantum_crypto.encrypt(record)
         encrypted_records[patient_id] = encrypted
         
+        # Broadcast encryption to all actors
+        broadcast_to_all('data_encrypted', {
+            'patient_id': patient_id,
+            'patient_name': record['name'],
+            'encrypted_data': encrypted,
+            'timestamp': datetime.now().isoformat()
+        })
+        
         log_event('RECORD_ENCRYPTED', f'Record encrypted for patient {patient_id}', 'INFO')
         
         return jsonify({
@@ -122,6 +208,14 @@ def encrypt_record():
 @app.route('/api/records/decrypt', methods=['POST'])
 def decrypt_record():
     try:
+        if current_qber > 11:
+            log_event('DECRYPTION_BLOCKED', f'Decryption blocked due to compromised key (QBER: {current_qber:.2f}%)', 'CRITICAL')
+            return jsonify({
+                'error': 'Decryption blocked - quantum key compromised',
+                'qber': current_qber,
+                'security_status': 'COMPROMISED'
+            }), 403
+        
         data = request.get_json()
         encrypted_data = data.get('encrypted_data')
         
@@ -283,4 +377,4 @@ def health_check():
 
 if __name__ == '__main__':
     log_event('SYSTEM_START', 'Quantum Health Shield backend initialized', 'INFO')
-    app.run(debug=True, port=5000)
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000)

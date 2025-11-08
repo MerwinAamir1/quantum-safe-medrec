@@ -60,11 +60,12 @@ class BB84Protocol:
         self.basis_matches = 0
         self.execution_time = 0
         
-    def execute(self):
+    def execute(self, intercepted_qubits=None):
         start_time = datetime.now()
         
-        qubits = self.alice.prepare_qubits()
-        self.bob.measure_qubits(qubits)
+        # Use intercepted qubits if Eve was active, otherwise use Alice's original qubits
+        qubits_to_measure = intercepted_qubits if intercepted_qubits is not None else self.alice.prepare_qubits()
+        self.bob.measure_qubits(qubits_to_measure)
         
         self.sifted_key_alice = []
         self.sifted_key_bob = []
